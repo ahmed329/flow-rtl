@@ -57,7 +57,7 @@ class Rendition {
       resizeOnOrientationChange: true,
       script: null,
       snap: false,
-      defaultDirection: 'ltr',
+      defaultDirection: 'rtl',
       allowScriptedContent: false,
       allowPopups: false,
     })
@@ -206,28 +206,6 @@ class Rendition {
   }
 
   /**
-   * Detect language and RTL direction from book metadata
-   * @return {object} language and isRTL properties
-   */
-  detectLanguage() {
-    const metadata = this.book.package.metadata
-    const language = metadata.language || 'en'
-    
-    // قائمة اللغات RTL
-    const rtlLanguages = ['ar', 'he', 'fa', 'ur', 'dv', 'ha', 'khw', 'ks', 'ku', 'ps', 'yi']
-    
-    // التحقق إذا كانت اللغة من اللغات RTL
-    const isRTL = rtlLanguages.some(rtlLang => 
-      language.toLowerCase().startsWith(rtlLang)
-    )
-    
-    return {
-      language,
-      isRTL
-    }
-  }
-
-  /**
    * Start the rendering
    * @return {Promise} rendering has started
    */
@@ -260,12 +238,9 @@ class Rendition {
       })
     }
 
-    // إضافة الكشف عن اللغة
-    const { isRTL } = this.detectLanguage()
-    const direction = isRTL ? 'rtl' : 
-      (this.book.package.metadata.direction || this.settings.defaultDirection)
-
-    this.direction(direction)
+    this.direction(
+      this.book.package.metadata.direction || this.settings.defaultDirection,
+    )
 
     // Parse metadata to get layout props
     this.settings.globalLayoutProperties = this.determineLayoutProperties(
@@ -624,53 +599,110 @@ class Rendition {
     return properties
   }
 
-  direction(dir) {
-    if (dir) {
-      this._direction = dir
-      this.manager && this.manager.direction(dir)
-      this.emit(EVENTS.RENDITION.DIRECTION, dir)
+  /**
+   * Adjust the flow of the rendition to paginated or scrolled
+   * (scrolled-continuous vs scrolled-doc are handled by different view managers)
+   * @param  {string} flow
+   */
+  flow(flow) {
+    var _flow = flow
+    if (
+      flow === 'scrolled' ||
+      flow === 'scrolled-doc' ||
+      flow === 'scrolled-continuous'
+    ) {
+      _flow = 'scrolled'
     }
-    return this._direction
+
+    if (flow === 'auto' || flow === 'paginated') {
+      _flow = 'paginated'
+    }
+
+    this.settings.flow = flow
+
+    if (this._layout) {
+      this._layout.flow(_flow)
+    }
+
+    if (this.manager && this._layout) {
+      this.manager.applyLayout(this._layout)
+    }
+
+    if (this.manager) {
+      this.manager.updateFlow(_flow)
+    }
+
+    if (this.manager && this.manager.isRendered() && this.location) {
+      this.manager.clear()
+      this.display(this.location.start.cfi)
+    }
   }
 
+  /**
+   * Adjust the layout of the rendition to reflowable or pre-paginated
+   * @param  {object} settings
+   */
+  layout(settings) {
+    if (settings) {
+      this._layout = new Layout(settings)
+      this._layout.spread(settings.spread, this.settings.minSpreadWidth)
 
+      // this.mapping = new Mapping(this._layout.props);
 
-  layout(layout) {
-    if (layout) {
-      this._layout = layout
-      this.manager && this.manager.layout(layout)
-      if (
-        this.manager &&
-        this.manager.isRendered() &&
-        this.location
-      ) {
-        this.manager.clear()
-        this.display(this.location.start.cfi)
-      }
-      this.emit(EVENTS.RENDITION.LAYOUT, layout)
+      this._layout.on(EVENTS.LAYOUT.UPDATED, (props, changed) => {
+        this.emit(EVENTS.RENDITION.LAYOUT, props, changed)
+      })
     }
+
+    if (this.manager && this._layout) {
+      this.manager.applyLayout(this._layout)
+    }
+
     return this._layout
   }
 
+  /**
+   * Adjust if the rendition uses spreads
+   * @param  {string} spread none | auto (TODO: implement landscape, portrait, both)
+   * @param  {int} [min] min width to use spreads at
+   */
   spread(spread, min) {
-    if (spread) {
-      this._spread = spread
-      this.manager && this.manager.spread(spread, min)
-      if (
-        this.manager &&
-        this.manager.isRendered() &&
-        this.location
-      ) {
-        this.manager.clear()
-        this.display(this.location.start.cfi)
-      }
-      this.emit(EVENTS.RENDITION.SPREAD, spread)
+    this.settings.spread = spread
+
+    if (min) {
+      this.settings.minSpreadWidth = min
     }
-    return this._spread
+
+    if (this._layout) {
+      this._layout.spread(spread, min)
+    }
+
+    if (this.manager && this.manager.isRendered()) {
+      this.manager.updateLayout()
+    }
+  }
+
+  /**
+   * Adjust the direction of the rendition
+   * @param  {string} dir
+   */
+  direction(dir) {
+    this.settings.direction = dir || 'ltr'
+
+    if (this.manager) {
+      this.manager.direction(this.settings.direction)
+    }
+
+    if (this.manager && this.manager.isRendered() && this.location) {
+      this.manager.clear()
+      this.display(this.location.start.cfi)
+    }
   }
 
   /**
    * Report the current location
+   * @fires relocated
+   * @fires locationChanged
    */
   reportLocation() {
     return this.q.enqueue(
@@ -678,7 +710,11 @@ class Rendition {
         requestAnimationFrame(
           function reportedLocationAfterRAF() {
             var location = this.manager.currentLocation()
-            if (location && location.then && typeof location.then === 'function') {
+            if (
+              location &&
+              location.then &&
+              typeof location.then === 'function'
+            ) {
               location.then(
                 function (result) {
                   let located = this.located(result)
@@ -689,22 +725,15 @@ class Rendition {
 
                   this.location = located
 
-                  this.emit(
-                    EVENTS.RENDITION.LOCATION_CHANGED,
-                    {
-                      index: this.location.start.index,
-                      href: this.location.start.href,
-                      start: this.location.start.cfi,
-                      end: this.location.end.cfi,
-                      percentage: this.location.start.percentage,
-                    },
-                    this.location,
-                  )
+                  this.emit(EVENTS.RENDITION.LOCATION_CHANGED, {
+                    index: this.location.start.index,
+                    href: this.location.start.href,
+                    start: this.location.start.cfi,
+                    end: this.location.end.cfi,
+                    percentage: this.location.start.percentage,
+                  })
 
-                  this.emit(
-                    EVENTS.RENDITION.RELOCATED,
-                    this.location,
-                  )
+                  this.emit(EVENTS.RENDITION.RELOCATED, this.location)
                 }.bind(this),
               )
             } else if (location) {
@@ -727,47 +756,20 @@ class Rendition {
                * @property {number} percentage
                * @memberof Rendition
                */
-              this.emit(
-                EVENTS.RENDITION.LOCATION_CHANGED,
-                {
-                  index: this.location.start.index,
-                  href: this.location.start.href,
-                  start: this.location.start.cfi,
-                  end: this.location.end.cfi,
-                  percentage: this.location.start.percentage,
-                },
-                this.location,
-              )
+              this.emit(EVENTS.RENDITION.LOCATION_CHANGED, {
+                index: this.location.start.index,
+                href: this.location.start.href,
+                start: this.location.start.cfi,
+                end: this.location.end.cfi,
+                percentage: this.location.start.percentage,
+              })
 
               /**
                * @event relocated
-               * @type {object}
-               * @property {object} start
-               * @property {string} start.index
-               * @property {string} start.href
-               * @property {object} start.displayed
-               * @property {EpubCFI} start.cfi
-               * @property {number} start.location
-               * @property {number} start.percentage
-               * @property {number} start.displayed.page
-               * @property {number} start.displayed.total
-               * @property {object} end
-               * @property {string} end.index
-               * @property {string} end.href
-               * @property {object} end.displayed
-               * @property {EpubCFI} end.cfi
-               * @property {number} end.location
-               * @property {number} end.percentage
-               * @property {number} end.displayed.page
-               * @property {number} end.displayed.total
-               * @property {boolean} atStart
-               * @property {boolean} atEnd
+               * @type {displayedLocation}
                * @memberof Rendition
                */
-              this.emit(
-                EVENTS.RENDITION.RELOCATED,
-                this.location,
-              )
+              this.emit(EVENTS.RENDITION.RELOCATED, this.location)
             }
           }.bind(this),
         )
@@ -777,7 +779,7 @@ class Rendition {
 
   /**
    * Get the Current Location object
-   * @return {Location} location
+   * @return {displayedLocation | promise} location (may be a promise)
    */
   currentLocation() {
     var location = this.manager.currentLocation()
@@ -795,9 +797,10 @@ class Rendition {
   }
 
   /**
-   * Creates a Location object from location
-   * @param {object} location
-   * @return {Location}
+   * Creates a Rendition#locationRange from location
+   * passed by the Manager
+   * @returns {displayedLocation}
+   * @private
    */
   located(location) {
     if (!location.length) {
@@ -832,15 +835,13 @@ class Rendition {
 
     if (locationStart != null) {
       located.start.location = locationStart
-      located.start.percentage = this.book.locations.percentageFromLocation(
-        locationStart,
-      )
+      located.start.percentage =
+        this.book.locations.percentageFromLocation(locationStart)
     }
     if (locationEnd != null) {
       located.end.location = locationEnd
-      located.end.percentage = this.book.locations.percentageFromLocation(
-        locationEnd,
-      )
+      located.end.percentage =
+        this.book.locations.percentageFromLocation(locationEnd)
     }
 
     let pageStart = this.book.pageList.pageFromCfi(start.mapping.start)
@@ -860,7 +861,10 @@ class Rendition {
       located.atEnd = true
     }
 
-    if (start.index === this.book.spine.first().index && start.mapping.start === 0) {
+    if (
+      start.index === this.book.spine.first().index &&
+      located.start.displayed.page === 1
+    ) {
       located.atStart = true
     }
 
@@ -908,7 +912,9 @@ class Rendition {
       contents.on(e, (ev) => this.triggerViewEvent(ev, contents))
     })
 
-    contents.on(EVENTS.CONTENTS.SELECTED, (e) => this.triggerSelectedEvent(e, contents))
+    contents.on(EVENTS.CONTENTS.SELECTED, (e) =>
+      this.triggerSelectedEvent(e, contents),
+    )
   }
 
   /**
@@ -921,15 +927,15 @@ class Rendition {
   }
 
   /**
-   * Emit a selection event
+   * Emit a selection event's CFI Range passed from a a view
    * @private
-   * @param  {EpubCFI} cfirange
+   * @param  {string} cfirange
    */
   triggerSelectedEvent(cfirange, contents) {
     /**
      * Emit that a text selection has occurred
      * @event selected
-     * @param {EpubCFI} cfirange
+     * @param {string} cfirange
      * @param {Contents} contents
      * @memberof Rendition
      */
@@ -937,7 +943,7 @@ class Rendition {
   }
 
   /**
-   * Emit a markClicked event
+   * Emit a markClicked event with the cfiRange and data from a mark
    * @private
    * @param  {EpubCFI} cfirange
    */
@@ -974,6 +980,7 @@ class Rendition {
   /**
    * Hook to adjust images to fit in columns
    * @param  {Contents} contents
+   * @private
    */
   adjustImages(contents) {
     if (this._layout.name === 'pre-paginated') {
@@ -985,21 +992,30 @@ class Rendition {
     let computed = contents.window.getComputedStyle(contents.content, null)
     let height =
       (contents.content.offsetHeight -
-        (parseFloat(computed.paddingTop) + parseFloat(computed.paddingBottom))) *
+        (parseFloat(computed.paddingTop) +
+          parseFloat(computed.paddingBottom))) *
       0.95
+    let horizontalPadding =
+      parseFloat(computed.paddingLeft) + parseFloat(computed.paddingRight)
 
     contents.addStylesheetRules({
       img: {
-        'max-width': '100%',
-        'max-height': height + 'px',
+        'max-width':
+          (this._layout.columnWidth
+            ? this._layout.columnWidth - horizontalPadding + 'px'
+            : '100%') + '!important',
+        'max-height': height + 'px' + '!important',
         'object-fit': 'contain',
         'page-break-inside': 'avoid',
         'break-inside': 'avoid',
         'box-sizing': 'border-box',
       },
       svg: {
-        'max-width': '100%',
-        'max-height': height + 'px',
+        'max-width':
+          (this._layout.columnWidth
+            ? this._layout.columnWidth - horizontalPadding + 'px'
+            : '100%') + '!important',
+        'max-height': height + 'px' + '!important',
         'page-break-inside': 'avoid',
         'break-inside': 'avoid',
       },
@@ -1033,6 +1049,7 @@ class Rendition {
   /**
    * Hook to handle link clicks in rendered content
    * @param  {Contents} contents
+   * @private
    */
   handleLinks(contents) {
     if (contents) {
@@ -1048,6 +1065,7 @@ class Rendition {
    * a Section is serialized
    * @param  {document} doc
    * @param  {Section} section
+   * @private
    */
   injectStylesheet(doc, section) {
     let style = doc.createElement('link')
@@ -1058,10 +1076,11 @@ class Rendition {
   }
 
   /**
-   * Hook to handle injecting script before
+   * Hook to handle injecting scripts before
    * a Section is serialized
    * @param  {document} doc
    * @param  {Section} section
+   * @private
    */
   injectScript(doc, section) {
     let script = doc.createElement('script')
@@ -1076,6 +1095,7 @@ class Rendition {
    * a Section is serialized
    * @param  {document} doc
    * @param  {Section} section
+   * @private
    */
   injectIdentifier(doc, section) {
     let ident = this.book.packaging.metadata.identifier
