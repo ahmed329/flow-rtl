@@ -633,14 +633,7 @@ class Rendition {
     return this._direction
   }
 
-  flow(flow) {
-    if (flow) {
-      this._flow = flow
-      this.manager && this.manager.flow(flow)
-      this.emit(EVENTS.RENDITION.FLOW, flow)
-    }
-    return this._flow
-  }
+
 
   layout(layout) {
     if (layout) {
